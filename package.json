@@ -1,0 +1,21 @@
+{
+  "name": "tronproject",
+  "version": "1.0.0",
+  "main": "tronbox-config.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@openzeppelin/contracts-upgradeable": "^5.2.0",
+    "@openzeppelin/truffle-upgrades": "^1.21.0",
+    "openzeppelin-solidity": "^2.2.0",
+    "tronweb": "^6.0.1"
+  }
+}
