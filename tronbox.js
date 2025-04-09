@@ -10,14 +10,14 @@ module.exports = {
       network_id: '1'
     },
     shasta: {
-      privateKey: "e954f4c1ad7c7190e2f267d9e827309c44a4146ae7db67fa10c8cacd097d0f42",
+      privateKey: "",
       userFeePercentage: 50,
       feeLimit: 1000 * 1e6,
       fullHost: 'https://api.shasta.trongrid.io',
       network_id: '2'
     },
     nile: {
-      privateKey: "e954f4c1ad7c7190e2f267d9e827309c44a4146ae7db67fa10c8cacd097d0f42",
+      privateKey: "",
       userFeePercentage: 100,
       feeLimit: 1000 * 1e6,
       fullHost: 'https://nile.trongrid.io',
