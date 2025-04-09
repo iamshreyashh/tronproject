@@ -1,340 +1,177 @@
 // SPDX-License-Identifier: MIT
-// Compatible with OpenZeppelin Contracts ^5.0.0
 pragma solidity ^0.8.22;
 
 import "interfaces/ITRC20.sol";
 
-
-/// Interface to fetch decimal of stablecoin
 interface ITRC20Metadata is ITRC20 {
     function decimals() external view returns (uint8);
 }
 
-/// Interface for the factory contract
-interface INuChainFactory {
+interface IFactory {
     function tradingFee() external view returns (uint256);
-
     function rewardRate() external view returns (uint256);
-
     function rewardPeriod() external view returns (uint256);
-
     function paused() external view returns (bool);
-
-    function normalize(uint256 amount, uint256 decimals)
-        external
-        view
-        returns (uint256);
-
-    function denormalize(uint256 amount, uint256 decimals)
-        external
-        view
-        returns (uint256);
+    function normalize(uint256 amount, uint256 decimals) external view returns (uint256);
+    function denormalize(uint256 amount, uint256 decimals) external view returns (uint256);
 }
 
-contract LiquidityPoolTRC20tron 
-{
-    
-   /// TRC20 contract address
-   address public owner = msg.sender;
-    uint256 public ethcoin;
-    INuChainFactory public factory; /// NuChain Factory contract address
-    uint256 public totalLiquidityTRC20; /// Returns the value of total liquidity of TRC20
-    uint256 public totalLiquidityNativeToken; ///Returns the value of total liquidity of paired stablecoin
-    uint8 private NativeoinDecimal; /// Stores the decimal of paired stablecoin
+contract GenericLiquidityPool {
+    address public owner = msg.sender;
+    uint256 public totalLiquidityToken;
+    uint256 public totalLiquidityNative;
+    uint8 private nativeTokenDecimals;
     uint64 private nonce;
+    IFactory public factory;
 
-    /// @struct store the info of Liquidity provider
-    struct LiquidityProviderInfo {
-        uint256 liquidityTRC;
-        uint256 liquidityStablecoin;
-        uint256 rewardLastTime;
+    struct LiquidityProvider {
+        uint256 tokenAmount;
+        uint256 nativeAmount;
+        uint256 lastRewardTime;
     }
 
-    /// Liquidity Provider => Liquidity Provider Info
-    mapping(address => LiquidityProviderInfo) public liquidityProviderInfo;
+    mapping(address => LiquidityProvider) public providers;
 
-    /// Events of the contract
-    event LiquidityAdded(
-        address indexed user,
-        uint256 amountTRC20,
-        uint256 amountStablecoin
-    );
-
-    event LiquidityRemoved(
-        address indexed user,
-        uint256 amountTRC20
-    );
-
-    event RecivedTRC20(
-        address indexed user,
-        address tokenIn,
-        uint256 amountIn,
-        uint256 amountOut,
-        uint nonce
-    );
-
-    event SwappedETHtoTRC20(
-        address indexed user,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
-    );
-
+    event LiquidityAdded(address indexed user, uint256 tokenAmount, uint256 nativeAmount);
+    event LiquidityRemoved(address indexed user, uint256 tokenAmount);
+    event TokenSwapIn(address indexed user, address tokenIn, uint256 amountIn, uint256 amountOut, uint nonce);
+    event NativeToTokenSwap(address indexed user, address tokenOut, uint256 amountIn, uint256 amountOut);
     event RewardClaimed(address indexed user, uint256 reward);
+    event PoolRebalanced(uint256 amount, string direction);
 
-    event PegRebalanced(uint256 amount, string direction);
-
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    // constructor() {
-    //     _disableInitializers();
-    // }
-
-    /* 
-         @notice initialize the function
-         @param _defaultAdmin Default Admin of the contract
-         @param _TRC20 contract address of TRC20
-         @param _stablecoin paired stable coin contract address
-         @param _factory NuChain Factory contract address
-
-    */
-
-
-    
-    //Modifier to ensure valid token amount
     modifier validAmount(uint256 _amount) {
-        require(_amount > 0, "Invalid Amount");
+        require(_amount > 0, "Amount must be greater than zero");
         _;
     }
 
-    //Modifier to ensure reward period is complete 
-    modifier rewardCoolDown(address _user) {
-        LiquidityProviderInfo memory liquidity = liquidityProviderInfo[_user];
+    modifier rewardCooldown(address _user) {
         require(
-            block.timestamp >=
-                liquidity.rewardLastTime + factory.rewardPeriod(),
-            "Reward cooldown period not met"
+            block.timestamp >= providers[_user].lastRewardTime + factory.rewardPeriod(),
+            "Reward cooldown active"
         );
         _;
     }
 
-    modifier restricted() {
-    require(
-      msg.sender == owner,
-      "This function is restricted to the contract's owner"
-    );
-    _;
-  }
-
-    //Modifier to ensure that liquidity pool is not paused
-    modifier whenPoolNotPaused() {
-        require(factory.paused() == false, "Liquidity Pools are paused");
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can execute");
         _;
     }
 
-    // ======================
-    // Liquidity Management
-    // ======================
-
-    /*
-        @notice Add Liquidity to the pool
-        @param _amountTRC20 TRC20 amount that user want to add
-        @param _amountStablecoin amount of paired stablecoin that user want to add
-    */
-    function addLiquidityTRC20(uint256 _amountTRC20, address _tokenAddress)
-    external payable
-    whenPoolNotPaused
-    validAmount(_amountTRC20)
-{
-    uint256 _amountStablecoin = msg.value;
-    require(
-        ITRC20(_tokenAddress).transferFrom(msg.sender, address(this), _amountTRC20),
-        "TRC20 transfer failed"
-    );
-    
-    uint256 totalReward;
-    LiquidityProviderInfo storage liquidity = liquidityProviderInfo[msg.sender];
-
-    // Avoid redundant reward calculation if no liquidity is added/removed
-    if (liquidity.liquidityTRC > 0 || liquidity.liquidityStablecoin > 0) {
-        totalReward = calculateReward(msg.sender);
-        require(
-            ITRC20(_tokenAddress).transfer(msg.sender, totalReward),
-            "TRC20 transfer failed"
-        );
+    modifier poolActive() {
+        require(!factory.paused(), "Pool is paused");
+        _;
     }
 
-    liquidity.liquidityTRC += _amountTRC20;
-    liquidity.liquidityStablecoin += _amountStablecoin;
-    totalLiquidityTRC20 += _amountTRC20;
-    totalLiquidityNativeToken += _amountStablecoin;
-
-    totalLiquidityTRC20 -= totalReward;  // Deduct reward only after adding liquidity
-
-    liquidity.rewardLastTime = block.timestamp;
-
-    emit LiquidityAdded(msg.sender, _amountTRC20, _amountStablecoin);
-}
-
-
-    /*
-        @notice Add Liquidity to the pool
-        @param _amountTRC20 TRC20 amount that user want to remove
-        @param _amountStablecoin amount of paired stablecoin that user want to remove
-    */
-    function removeLiquidity(uint256 _amountTRC20, address _tokenAddress)
+    function addLiquidity(uint256 _tokenAmount, address _tokenAddress)
         external
-        whenPoolNotPaused
-    
-        validAmount(_amountTRC20)
+        payable
+        poolActive
+        validAmount(_tokenAmount)
     {
-        LiquidityProviderInfo storage liquidity = liquidityProviderInfo[
-            msg.sender
-        ];
+        uint256 nativeAmount = msg.value;
+        require(ITRC20(_tokenAddress).transferFrom(msg.sender, address(this), _tokenAmount), "Token transfer failed");
 
-        require(
-            liquidity.liquidityTRC >= _amountTRC20,
-            "Insufficient TRC20 balance"
-        );
+        uint256 reward;
+        LiquidityProvider storage lp = providers[msg.sender];
 
-
-        uint256 totalReward = calculateReward(msg.sender);
-
-        require(ITRC20(_tokenAddress).transfer(msg.sender, totalReward), "TRC20 Transfer Failed");
-
-        liquidity.liquidityTRC -= _amountTRC20;
-        
-        totalLiquidityTRC20 -= _amountTRC20;
-        totalLiquidityTRC20 -= totalReward;
-        liquidity.rewardLastTime = block.timestamp;
-
-        require(ITRC20(_tokenAddress).transfer(msg.sender, _amountTRC20), "TRC20 transfer Failed");
-        emit LiquidityRemoved(msg.sender, _amountTRC20);
-    }
-
-    //=====================//
-    // Trading(Swapping)   //
-    //=====================//
-
-    /*
-        @notice Swapping of stablecoins
-        @param _tokenIn Address of the token you want to swap in
-        @param _tokenOut Address of the token you want to swap out
-        @param _amountIn Amount of token you want to swap
-    */
-    function swapTRC20toUSDN(address _tokenIn, uint256 _amountIn)
-    external whenPoolNotPaused  validAmount(_amountIn)
-    returns (uint256 _amountOut)
-{
-
-    uint256 feeInTRC20 = (_amountIn * factory.tradingFee()) / 10000;
-    uint256 amountInAfterFee = _amountIn - feeInTRC20;
-    _amountOut = amountInAfterFee;
-    
-    require(totalLiquidityTRC20 >= _amountOut, "Insufficient Liquidity for Native token");
-    totalLiquidityNativeToken -= _amountOut;
-    totalLiquidityTRC20 += _amountIn;
-
-    require(ITRC20(_tokenIn).transferFrom(msg.sender, address(this), _amountIn), "Input token transfer failed");
-
-    emit RecivedTRC20(msg.sender, _tokenIn, _amountIn, _amountOut,nonce);
-    nonce++;
-}
-
-function transferTRC(address to, uint256 value, uint256 _nonce) external {
-    require(_nonce == (nonce-1), "invalid nonce");
-    require(to != address(0), "Invalid recipient address");
-    require(value > 0, "Invalid transfer value");
-    // Attempt to transfer tokens from the contract to the recipient
-    bool success = ITRC20(0x951b0d0B432122A85D3CA3fbeEea96d986543AcC).transfer(to, value);
-    require(success, "Token transfer failed");
-}
-
-    // ====================
-    // Reward Management
-    // ====================
-
-    /*
-        @notice Fuction to calculate the reward
-        @param _user address of the liquidity provider for which we want to calculate reward
-        @returns reward of the liquidity provider
-    */
-
-   function calculateReward(address _user) public view returns (uint256) {
-    LiquidityProviderInfo memory liquidity = liquidityProviderInfo[_user];
-    uint256 timeLapse = block.timestamp - liquidity.rewardLastTime;
-    uint256 numToMul = timeLapse / factory.rewardPeriod();
-
-    uint256 totalLiquidity = totalLiquidityTRC20 + totalLiquidityNativeToken;
-    require(totalLiquidity > 0, "No Liquidity in Pool");
-
-    uint256 userShare = ((liquidity.liquidityTRC + factory.normalize(
-        liquidity.liquidityStablecoin,
-        NativeoinDecimal
-    )) * 1e18) / totalLiquidity;
-
-    // Combine division with multiplication
-    return (numToMul * userShare * factory.rewardRate()) / (1e18);
-}
-
-
-    /*
-        @notice Fuction to claim the reward
-    */
-    // function claimReward() external whenPoolNotPaused  rewardCoolDown(msg.sender){
-    //     LiquidityProviderInfo storage liquidity = liquidityProviderInfo[
-    //         _msgSender()
-    //     ];
-
-    //     uint256 reward = calculateReward(msg.sender);
-    //     require(reward > 0, "No rewards to claim");
-    //     require(ITRC20(_tokenAddress).transfer(msg.sender, reward),"Reward transfer failed");
-    //     liquidity.rewardLastTime = block.timestamp;
-    //     totalLiquidityTRC20 -= reward;
-
-    //     emit RewardClaimed(msg.sender, reward);
-
-    // }
-
-    // =======================
-    // Peg Rebalancing
-    // =======================
-
-    /*
-        @notice function to rebalance the liquidity pool
-        @param _amount The amount default admin want to add
-        @param isAddLiquidityToTRC20 true if want to add TRC20 else false
-        only default admin can call this function
-    */
-    function rebalancePegTRC20(uint _amount, address _tokenAddress) external restricted
-    {
-            require(ITRC20(_tokenAddress).transferFrom(msg.sender,address(this),_amount),"TRC20 transfer failed");
-            totalLiquidityTRC20 += _amount;
-            emit PegRebalanced(_amount, "Added to TRC20");
-        
-    }
-
-    function rebalancePegNative(uint _amount) external payable restricted{ 
-           _amount = msg.value;
-           (bool success, ) = payable(address(this)).call{value: _amount}("");
-            require(success, "Native token transfer failed");
-            totalLiquidityNativeToken+= _amount;
-            emit PegRebalanced(_amount, "Added to Native");
+        if (lp.tokenAmount > 0 || lp.nativeAmount > 0) {
+            reward = calculateReward(msg.sender);
+            require(ITRC20(_tokenAddress).transfer(msg.sender, reward), "Reward transfer failed");
         }
 
+        lp.tokenAmount += _tokenAmount;
+        lp.nativeAmount += nativeAmount;
+        lp.lastRewardTime = block.timestamp;
 
-    /*
-        @notice function to withdraw the token
-        only default admin can call this function
-    */
-    function withdrawToken(address _to,address _token,uint256 _amount) external restricted{
-        require(
-            ITRC20(_token).transfer(_to, _amount),
-            "Emergency withdrawal failed"
-        );
-            totalLiquidityTRC20 -= _amount;
-      
+        totalLiquidityToken += _tokenAmount - reward;
+        totalLiquidityNative += nativeAmount;
+
+        emit LiquidityAdded(msg.sender, _tokenAmount, nativeAmount);
     }
 
+    function removeLiquidity(uint256 _tokenAmount, address _tokenAddress)
+        external
+        poolActive
+        validAmount(_tokenAmount)
+    {
+        LiquidityProvider storage lp = providers[msg.sender];
+        require(lp.tokenAmount >= _tokenAmount, "Insufficient balance");
 
-receive() external payable { }
+        uint256 reward = calculateReward(msg.sender);
+        require(ITRC20(_tokenAddress).transfer(msg.sender, reward), "Reward transfer failed");
+
+        lp.tokenAmount -= _tokenAmount;
+        totalLiquidityToken -= (_tokenAmount + reward);
+        lp.lastRewardTime = block.timestamp;
+
+        require(ITRC20(_tokenAddress).transfer(msg.sender, _tokenAmount), "Token return failed");
+
+        emit LiquidityRemoved(msg.sender, _tokenAmount);
+    }
+
+    function swapTokens(address _tokenIn, uint256 _amountIn)
+        external
+        poolActive
+        validAmount(_amountIn)
+        returns (uint256 outputAmount)
+    {
+        uint256 fee = (_amountIn * factory.tradingFee()) / 10000;
+        uint256 netAmount = _amountIn - fee;
+
+        outputAmount = netAmount;
+        require(totalLiquidityToken >= outputAmount, "Insufficient liquidity");
+
+        require(ITRC20(_tokenIn).transferFrom(msg.sender, address(this), _amountIn), "Transfer failed");
+
+        totalLiquidityNative -= outputAmount;
+        totalLiquidityToken += _amountIn;
+
+        emit TokenSwapIn(msg.sender, _tokenIn, _amountIn, outputAmount, nonce++);
+    }
+
+    function transferTokens(address to, uint256 value, uint256 _nonce) external {
+        require(_nonce == nonce - 1, "Invalid nonce");
+        require(to != address(0), "Invalid recipient");
+        require(value > 0, "Amount must be positive");
+
+        // NOTE: Replace the token address with your deployed token address when using this function
+        address tokenAddress = address(0); // <-- Replace with actual token address
+        require(ITRC20(tokenAddress).transfer(to, value), "Transfer failed");
+    }
+
+    function calculateReward(address user) public view returns (uint256) {
+        LiquidityProvider memory lp = providers[user];
+        uint256 timeElapsed = block.timestamp - lp.lastRewardTime;
+        uint256 intervals = timeElapsed / factory.rewardPeriod();
+
+        uint256 totalPool = totalLiquidityToken + totalLiquidityNative;
+        require(totalPool > 0, "Empty pool");
+
+        uint256 userShare = (
+            lp.tokenAmount + factory.normalize(lp.nativeAmount, nativeTokenDecimals)
+        ) * 1e18 / totalPool;
+
+        return (intervals * userShare * factory.rewardRate()) / 1e18;
+    }
+
+    function rebalanceTokenPool(uint256 amount, address tokenAddr) external onlyOwner {
+        require(ITRC20(tokenAddr).transferFrom(msg.sender, address(this), amount), "Transfer failed");
+        totalLiquidityToken += amount;
+        emit PoolRebalanced(amount, "Token Pool");
+    }
+
+    function rebalanceNativePool(uint256 amount) external payable onlyOwner {
+        amount = msg.value;
+        (bool success, ) = payable(address(this)).call{value: amount}("");
+        require(success, "Native transfer failed");
+        totalLiquidityNative += amount;
+        emit PoolRebalanced(amount, "Native Pool");
+    }
+
+    function emergencyWithdraw(address to, address token, uint256 amount) external onlyOwner {
+        require(ITRC20(token).transfer(to, amount), "Emergency withdrawal failed");
+        totalLiquidityToken -= amount;
+    }
+
+    receive() external payable {}
 }
